@@ -86,21 +86,36 @@ class QNet(NetWork):
         self.net = get_net(num_in=input_dim+action_dim, num_out=1, final_activation=None)
         self.post_init(1e-3)
 
-    def forward(self, states: Tensor, actions: Tensor):
-        return self.net(torch.cat([states, actions], dim=1))
+    def forward(self, obs: Tensor, actions: Tensor):
+        return self.net(torch.cat([obs, actions], dim=1))
+    
+    def val(self, obs: Tensor, actions: Tensor) -> Tensor:
+        return self(obs, actions)
+    
+class VNet(NetWork):
+    """Has little quirks; just a wrapper so that I don't need to call concat many times"""
+
+    def __init__(self, input_dim):
+        super(VNet, self).__init__()
+        self.net = get_net(num_in=input_dim, num_out=1, final_activation=None)
+        self.post_init(1e-3)
+
+    def forward(self, obs: Tensor):
+        return self.net(obs)
+    
+    def val(self, obs: Tensor):
+        return self(obs)
+
 
 class Trainer:
     def __init__(self, input_dim, action_dim):
 
         self.actor   = Actor(input_dim=input_dim, action_dim=action_dim)
 
-        self.Q1       = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.Q1_targ  = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.Q1_targ.load_state_dict(self.Q1.state_dict())
-
-        self.Q2       = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.Q2_targ  = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.Q2_targ.load_state_dict(self.Q2.state_dict())
+        self.critic = QNet(input_dim=input_dim, action_dim=action_dim)
+        self.target = QNet(input_dim=input_dim, action_dim=action_dim)
+        self.target.load_state_dict(self.critic.state_dict())
+        self.value = VNet(input_dim)
 
         self.gamma = 0.99
         self.alpha = 0.1
@@ -134,64 +149,38 @@ class Trainer:
         b_d = b.d.to(device)
         b_r = b.r.to(device)
         b_a = b.a.to(device)
-        # ========================================
-        # Step 12: calculating targets
-        # ========================================
 
         with torch.no_grad():
-            na, logp = self.actor.act(b_ns)
-            targets = b_r + self.gamma * (1 - b_d) * \
-                      (torch.min(self.Q1_targ(b_ns, na), self.Q2_targ(b_ns, na)) - self.alpha * logp)
+            a, logp = self.actor.act(b_ns)
+            v_next = self.target.val(b_ns, a) - self.alpha * logp
+            qtarget = b_r + self.gamma * (1 - b_d) * v_next
 
-        # ========================================
-        # Step 13: learning the Q functions
-        # ========================================
+        qvalue = self.critic(b_s, b_a)
+        qloss = torch.mean((qvalue - qtarget) ** 2)
 
-        Q1_predictions = self.Q1(b_s, b_a)
-        Q1_loss = torch.mean((Q1_predictions - targets) ** 2)
-
-        self.Q1.optimizer.zero_grad()
-        Q1_loss.backward()
-        self.clip_gradient(net=self.Q1)
-        self.Q1.optimizer.step()
-
-        Q2_predictions = self.Q2(b_s, b_a)
-        Q2_loss = torch.mean((Q2_predictions - targets) ** 2)
-
-        self.Q2.optimizer.zero_grad()
-        Q2_loss.backward()
-        self.clip_gradient(net=self.Q2)
-        self.Q2.optimizer.step()
+        self.critic.optimizer.zero_grad()
+        qloss.backward()
+        self.clip_gradient(self.critic)
+        self.critic.optimizer.step()
 
         # ========================================
         # Step 14: learning the policy
         # ========================================
 
-        for param in self.Q1.parameters():
-            param.requires_grad = False
-        for param in self.Q2.parameters():
-            param.requires_grad = False
-
         a, logp = self.actor.act(b_s)
-        policy_loss = - torch.mean(torch.min(self.Q1(b_s, a), self.Q2(b_s, a)) - self.alpha * logp)
+        aloss = - self.critic.val(b_s, a).mean()
 
         self.actor.optimizer.zero_grad()
-        policy_loss.backward()
-        self.clip_gradient(net=self.actor)
+        aloss.backward()
+        self.clip_gradient(self.actor)
         self.actor.optimizer.step()
-
-        for param in self.Q1.parameters():
-            param.requires_grad = True
-        for param in self.Q2.parameters():
-            param.requires_grad = True
 
         # ========================================
         # Step 15: update target networks
         # ========================================
 
         with torch.no_grad():
-            self.polyak_update(old_net=self.Q1_targ, new_net=self.Q1)
-            self.polyak_update(old_net=self.Q2_targ, new_net=self.Q2)
+            self.polyak_update(old_net=self.target, new_net=self.critic)
 
     def save_actor(self, save_dir: str, filename: str) -> None:
         os.makedirs(save_dir, exist_ok=True)
