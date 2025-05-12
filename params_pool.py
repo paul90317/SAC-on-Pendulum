@@ -107,12 +107,12 @@ class ParamsPool:
         # actually, we can just use reparametrization trick in both Step 12 and 14, but it might be good to separate
         # the two cases for pedagogical purposes, i.e., using reparametrization trick is a must in Step 14
         u = mu_given_s.rsample() if use_reparametrization_trick else mu_given_s.sample()
-        a = torch.tanh(u)
+        a = 2 * torch.tanh(u)
         # the following line of code is not numerically stable:
         # log_pi_a_given_s = mu_given_s.log_prob(u) - torch.sum(torch.log(1 - torch.tanh(u) ** 2), dim=1)
         # ref: https://github.com/vitchyr/rlkit/blob/0073d73235d7b4265cd9abe1683b30786d863ffe/rlkit/torch/distributions.py#L358
         # ref: https://github.com/tensorflow/probability/blob/master/tensorflow_probability/python/bijectors/tanh.py#L73
-        log_pi_a_given_s = mu_given_s.log_prob(u) - (2 * (np.log(2) - u - F.softplus(-2 * u))).sum(dim=1)
+        log_pi_a_given_s = mu_given_s.log_prob(u) - 2 * (np.log(2) - u - F.softplus(-2 * u)) - np.log(2)
         return a, log_pi_a_given_s
 
     def clip_gradient(self, net: nn.Module) -> None:
