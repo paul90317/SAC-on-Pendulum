@@ -5,9 +5,10 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 from torch.distributions import Normal
+import gymnasium as gym
 from torch import Tensor
-
-from replay_buffer import Batch
+import random
+from collections import deque
 
 device = torch.device('cuda')
 
@@ -93,29 +94,46 @@ class QNet(NetWork):
         return self(obs, actions)
 
 class Trainer:
-    def __init__(self, input_dim, action_dim):
+    def __init__(self, env: gym.Env):
         self.n_critics = 2
-        self.actor   = Actor(input_dim=input_dim, action_dim=action_dim)
-
-        self.critics = [QNet(input_dim=input_dim, action_dim=action_dim) for _ in range(self.n_critics)]
-        self.targets = [QNet(input_dim=input_dim, action_dim=action_dim) for _ in range(self.n_critics)]
-
-        for t, c in zip(self.critics, self.targets):
-            t.load_state_dict(c.state_dict())
-
         self.gamma = 0.99
         self.alpha = 0.1
         self.polyak = 0.995
+        self.replay_buf_size = 10000
+        self.batch_size = 64
+        self.warmup = 200
+
+        self.env = env
+        self.actor   = Actor(input_dim=env.observation_space.shape[0], action_dim=env.action_space.shape[0])
+        self.critics = [QNet(input_dim=env.observation_space.shape[0], action_dim=env.action_space.shape[0]) for _ in range(self.n_critics)]
+        self.targets = [QNet(input_dim=env.observation_space.shape[0], action_dim=env.action_space.shape[0]) for _ in range(self.n_critics)]
+
+        for t, c in zip(self.critics, self.targets):
+            t.load_state_dict(c.state_dict())
+        
+        self.replay_buf = deque(maxlen=self.replay_buf_size)
 
     # ==================================================================================================================
     # Helper methods (it is generally not my style of using helper methods but here they improve readability)
     # ==================================================================================================================
 
-    def step(self, obs: np.ndarray) -> tuple:
+    def step(self) -> tuple:
         with torch.no_grad():
-            obs = tensor(obs).unsqueeze(0)
+            obs = tensor(self.obs).unsqueeze(0)
             act, _ = self.actor.act(obs)
-            return act[0].cpu().numpy()
+            a = act[0].cpu().numpy()
+            step_info = self.env.step(a)
+            obs_next, reward, ter, _, _ = step_info
+            self.replay_buf.append([
+                self.obs, a, reward, obs_next, ter
+            ])
+            self.obs = obs_next
+            return step_info
+
+    def reset(self, seed = None, options = None):
+        reset_info = self.env.reset(seed=seed, options=options)
+        self.obs = reset_info[0]
+        return reset_info
 
     def polyak_update(self, old_net: nn.Module, new_net: nn.Module) -> None:
         for old_param, new_param in zip(old_net.parameters(), new_net.parameters()):
@@ -125,21 +143,26 @@ class Trainer:
     # Methods for learning
     # ==================================================================================================================
 
-    def update_networks(self, b: Batch) -> None:
-        b_s = b.s.to(device)
-        b_ns = b.ns.to(device)
-        b_d = b.d.to(device)
-        b_r = b.r.to(device)
-        b_a = b.a.to(device)
+    def update_networks(self) -> None:
+        if len(self.replay_buf) < self.warmup:
+            return
+
+        obs, action, reward, obs_next, done = zip(*random.sample(self.replay_buf, self.batch_size))
+        
+        obs = tensor(np.array(obs))
+        action = tensor(np.array(action))
+        reward = tensor(reward).unsqueeze(1)
+        obs_next = tensor(np.array(obs_next))
+        done = tensor(done).unsqueeze(1)
 
         with torch.no_grad():
-            a, logp = self.actor.act(b_ns)
-            v_next = torch.stack([t.val(b_ns, a) for t in self.targets]).min(0).values
+            a, logp = self.actor.act(obs_next)
+            v_next = torch.stack([t.val(obs_next, a) for t in self.targets]).min(0).values
             v_next -= self.alpha * logp
-            qtarget = b_r + self.gamma * (1 - b_d) * v_next
+            qtarget = reward + self.gamma * (1 - done) * v_next
 
         for c in self.critics:
-            qvalue = c.val(b_s, b_a)
+            qvalue = c.val(obs, action)
             qloss = torch.mean((qvalue - qtarget) ** 2)
             c.optimizer.zero_grad()
             qloss.backward()
@@ -149,8 +172,8 @@ class Trainer:
         # Step 14: learning the policy
         # ========================================
 
-        a, logp = self.actor.act(b_s)
-        aloss = - torch.stack([c.val(b_s, a) for c in self.critics]).min(0).values
+        a, logp = self.actor.act(obs)
+        aloss = - torch.stack([c.val(obs, a) for c in self.critics]).min(0).values
         aloss += self.alpha * logp
         aloss = aloss.mean()
 
