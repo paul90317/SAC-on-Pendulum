@@ -91,31 +91,17 @@ class QNet(NetWork):
     
     def val(self, obs: Tensor, actions: Tensor) -> Tensor:
         return self(obs, actions)
-    
-class VNet(NetWork):
-    """Has little quirks; just a wrapper so that I don't need to call concat many times"""
-
-    def __init__(self, input_dim):
-        super(VNet, self).__init__()
-        self.net = get_net(num_in=input_dim, num_out=1, final_activation=None)
-        self.post_init(1e-3)
-
-    def forward(self, obs: Tensor):
-        return self.net(obs)
-    
-    def val(self, obs: Tensor):
-        return self(obs)
-
 
 class Trainer:
     def __init__(self, input_dim, action_dim):
-
+        self.n_critics = 2
         self.actor   = Actor(input_dim=input_dim, action_dim=action_dim)
 
-        self.critic = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.target = QNet(input_dim=input_dim, action_dim=action_dim)
-        self.target.load_state_dict(self.critic.state_dict())
-        self.value = VNet(input_dim)
+        self.critics = [QNet(input_dim=input_dim, action_dim=action_dim) for _ in range(self.n_critics)]
+        self.targets = [QNet(input_dim=input_dim, action_dim=action_dim) for _ in range(self.n_critics)]
+
+        for t, c in zip(self.critics, self.targets):
+            t.load_state_dict(c.state_dict())
 
         self.gamma = 0.99
         self.alpha = 0.1
@@ -130,10 +116,6 @@ class Trainer:
             obs = tensor(obs).unsqueeze(0)
             act, _ = self.actor.act(obs)
             return act[0].cpu().numpy()
-
-    def clip_gradient(self, net: nn.Module) -> None:
-        for param in net.parameters():
-            param.grad.data.clamp_(-1, 1)
 
     def polyak_update(self, old_net: nn.Module, new_net: nn.Module) -> None:
         for old_param, new_param in zip(old_net.parameters(), new_net.parameters()):
@@ -152,27 +134,28 @@ class Trainer:
 
         with torch.no_grad():
             a, logp = self.actor.act(b_ns)
-            v_next = self.target.val(b_ns, a) - self.alpha * logp
+            v_next = torch.stack([t.val(b_ns, a) for t in self.targets]).min(0).values
+            v_next -= self.alpha * logp
             qtarget = b_r + self.gamma * (1 - b_d) * v_next
 
-        qvalue = self.critic(b_s, b_a)
-        qloss = torch.mean((qvalue - qtarget) ** 2)
-
-        self.critic.optimizer.zero_grad()
-        qloss.backward()
-        self.clip_gradient(self.critic)
-        self.critic.optimizer.step()
+        for c in self.critics:
+            qvalue = c.val(b_s, b_a)
+            qloss = torch.mean((qvalue - qtarget) ** 2)
+            c.optimizer.zero_grad()
+            qloss.backward()
+            c.optimizer.step()
 
         # ========================================
         # Step 14: learning the policy
         # ========================================
 
         a, logp = self.actor.act(b_s)
-        aloss = - self.critic.val(b_s, a).mean()
+        aloss = - torch.stack([c.val(b_s, a) for c in self.critics]).min(0).values
+        aloss += self.alpha * logp
+        aloss = aloss.mean()
 
         self.actor.optimizer.zero_grad()
         aloss.backward()
-        self.clip_gradient(self.actor)
         self.actor.optimizer.step()
 
         # ========================================
@@ -180,7 +163,8 @@ class Trainer:
         # ========================================
 
         with torch.no_grad():
-            self.polyak_update(old_net=self.target, new_net=self.critic)
+            for t, c in zip(self.targets, self.critics):
+                self.polyak_update(t, c)
 
     def save_actor(self, save_dir: str, filename: str) -> None:
         os.makedirs(save_dir, exist_ok=True)
