@@ -15,33 +15,21 @@ args = parser.parse_args()
 
 env = gym.make('Pendulum-v1')
 
-class NetBuilder(nn.Module):
-    def __init__(self, num_in: int, num_out: int, final_activation=None, num_hidden_layers: int = 5, num_neurons_per_hidden_layer: int = 64):
-        super(NetBuilder, self).__init__()
-        layers = []
+class MutiLinear(nn.Module):
+    def __init__(self, in_features, out_features, hidden_features, n_hidden):
+        super(MutiLinear, self).__init__()
+        models = []
+        models.append(nn.Linear(in_features, hidden_features))
+        models.append(nn.ReLU())
+        for _ in range(n_hidden):
+            models.append(nn.Linear(hidden_features, hidden_features))
+            models.append(nn.ReLU())
+        models.append(nn.Linear(hidden_features, out_features))
+        models.append(nn.ReLU())
 
-        # Input layer
-        layers.extend([
-            nn.Linear(num_in, num_neurons_per_hidden_layer),
-            nn.ReLU(),
-        ])
-
-        # Hidden layers
-        for _ in range(num_hidden_layers):
-            layers.extend([
-                nn.Linear(num_neurons_per_hidden_layer, num_neurons_per_hidden_layer),
-                nn.ReLU(),
-            ])
-
-        # Output layer
-        layers.append(nn.Linear(num_neurons_per_hidden_layer, num_out))
-
-        # Final activation (if provided)
-        if final_activation is not None:
-            layers.append(final_activation)
-
-        # Register the layers as a sequential model
-        self.model = nn.Sequential(*layers)
+        self.model = nn.Sequential(
+            *models
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
@@ -52,9 +40,12 @@ class Actor(ActorInterface):
 
     def __init__(self):
         super(Actor, self).__init__()
-        self.shared_net   = NetBuilder(num_in=env.observation_space.shape[0], num_out=64, final_activation=nn.ReLU())
-        self.means_net    = nn.Linear(64, env.action_space.shape[0])
-        self.log_stds_net = nn.Linear(64, env.action_space.shape[0])
+        self.shared_net   = nn.Sequential(
+            MutiLinear(3, 8, 16, 6),
+            nn.ReLU()
+        )
+        self.means_net    = nn.Linear(8, env.action_space.shape[0])
+        self.log_stds_net = nn.Linear(8, env.action_space.shape[0])
         self.post_init(1e-3)
         
 
@@ -76,7 +67,11 @@ class Critic(CriticInterface):
 
     def __init__(self):
         super(Critic, self).__init__()
-        self.net = NetBuilder(num_in=env.observation_space.shape[0]+env.action_space.shape[0], num_out=1, final_activation=None)
+        self.net = self.shared_net   = nn.Sequential(
+            MutiLinear(4, 8, 16, 6),
+            nn.ReLU(),
+            nn.Linear(8, 1)
+        )
         self.post_init(1e-3)
 
     def forward(self, obs: Tensor, actions: Tensor):
@@ -118,8 +113,8 @@ for e in range(num_episodes):
         obs = obs_next
 
         steps += 1
-        if steps % 1 == 0: 
-            agent.update_networks()
+        agent.update_networks()
+            
 
     after_episode_time = time.perf_counter()
     time_elapsed = after_episode_time - start_time
