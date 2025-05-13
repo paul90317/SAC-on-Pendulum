@@ -1,0 +1,113 @@
+import time
+import gymnasium as gym
+from torch import Tensor
+import torch.nn as nn
+from evaluation import evaluate, show_statistics
+from torch.distributions import Categorical
+from discreteSAC import ActorInterface, CriticInterface, Agent
+import sys
+
+_, run_id = sys.argv
+
+env = gym.make('CartPole-v1', render_mode="rgb_array")
+
+class MutiLinear(nn.Module):
+    def __init__(self, in_features, out_features, hidden_features, n_hidden):
+        super(MutiLinear, self).__init__()
+        models = []
+        models.append(nn.Linear(in_features, hidden_features))
+        models.append(nn.ReLU())
+        for _ in range(n_hidden):
+            models.append(nn.Linear(hidden_features, hidden_features))
+            models.append(nn.ReLU())
+        models.append(nn.Linear(hidden_features, out_features))
+        models.append(nn.ReLU())
+
+        self.model = nn.Sequential(
+            *models
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.model(x)
+
+class Actor(ActorInterface):
+    def __init__(self):
+        super(Actor, self).__init__()
+        self.net   = nn.Sequential(
+            MutiLinear(4, 8, 10, 4),
+            nn.ReLU(),
+            nn.Linear(8, 2)
+        )
+        self.post_init(1e-3)
+        
+
+    def forward(self, obs: Tensor):
+        logits = self.net(obs)
+        return Categorical(logits=logits)
+
+class Critic(CriticInterface):
+    def __init__(self):
+        super(Critic, self).__init__()
+        self.net = self.shared_net   = nn.Sequential(
+            MutiLinear(4, 8, 10, 4),
+            nn.ReLU(),
+            nn.Linear(8, 2)
+        )
+        self.post_init(1e-3)
+
+    def forward(self, obs: Tensor):
+        return self.net(obs)
+
+agent = Agent(
+    actor=Actor, 
+    critic=Critic,
+    n_critics=2,
+    gamma=0.99,
+    alpha=0.08,
+    polyak=0.995,
+    replay_buf_size=10000,
+    batch_size=256,
+    warmup=1000
+)
+
+num_episodes = 20000
+
+start_time = time.perf_counter()
+steps = 0
+
+for e in range(num_episodes):
+    agent.train()
+    obs, _ = env.reset()
+
+    total_reward = 0
+    done = False
+    loss_infos = []
+    while not done:
+        a = agent.predict(obs)
+        obs_next, reward, ter, tru, _ = env.step(a)
+        done = ter or tru
+        total_reward += reward
+
+        agent.push(
+            obs, a, reward, obs_next, ter
+        )
+        
+        obs = obs_next
+
+        steps += 1
+        loss_infos.append(agent.update_networks())
+
+        if steps % 2000 == 0:
+            evaluate(env, agent, run_id, steps, 3)
+            
+    
+    after_episode_time = time.perf_counter()
+    time_elapsed = after_episode_time - start_time
+    time_remaining = time_elapsed / (e + 1) * (num_episodes - (e + 1))
+
+    print(f'Episode {e:4.0f} | Return {total_reward:9.3f} | Steps {steps:4.0f} | Remaining time {round(time_remaining / 3600, 2):5.2f} hours')
+    show_statistics(loss_infos)
+    print()
+
+evaluate(env, agent, run_id, steps, 3)
+env.close()

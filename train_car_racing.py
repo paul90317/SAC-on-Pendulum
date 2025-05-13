@@ -12,8 +12,8 @@ from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation
 import numpy as np
 import pandas as pd
-import os, sys
-from gymnasium.wrappers import RecordVideo
+import sys
+from evaluation import evaluate, show_statistics
 
 stack_size = 8
 _, run_id = sys.argv
@@ -143,41 +143,6 @@ agent = Agent(
 
 steps = 0
 
-def evaluate_agent(num_eval_episodes=3):
-    video_dir = f'results/{run_id}/{steps}/'
-    os.makedirs(video_dir, exist_ok=True)
-    video = RecordVideo(env, video_dir, episode_trigger=lambda x: x % 4 == 0)  # Record all episodes in one video
-
-    agent.eval()
-    eval_rewards = []
-
-    for eval_episode in range(num_eval_episodes):
-        obs, _ = video.reset()
-        video.start_recording(f'{eval_episode}')
-        total_reward = 0
-        done = False
-        while not done:
-            a = agent.predict(obs)
-            obs, reward, done, _, _ = video.step(a)
-            total_reward += reward
-
-        eval_rewards.append(total_reward)
-        video.stop_recording()
-        print(f"Evaluation Episode {eval_episode + 1}: Total Reward = {total_reward:.3f}")
-
-    avg_reward = sum(eval_rewards) / num_eval_episodes
-    print(f"Average Reward over {num_eval_episodes} Evaluation Episodes: {avg_reward:.3f}")
-    torch.save(agent.state_dict(), f'results/{run_id}/{steps}/weight_{avg_reward}.pth')
-
-    return avg_reward
-
-# Generate statistics from loss_infos
-def generate_statistics(loss_infos):
-    df = pd.DataFrame(loss_infos)
-    mean_stats = df.mean()
-    print("Mean Statistics:")
-    print(mean_stats)
-
 num_episodes = 20000
 
 start_time = time.perf_counter()
@@ -204,9 +169,9 @@ for e in range(num_episodes):
         loss_infos.append(agent.update_networks()) 
 
         if steps % 4000 == 0:
-            evaluate_agent()
+            evaluate(env, agent, run_id, steps, 3)
 
-    generate_statistics(loss_infos)
+    show_statistics(loss_infos)
 
     after_episode_time = time.perf_counter()
     time_elapsed = after_episode_time - start_time
@@ -214,6 +179,6 @@ for e in range(num_episodes):
 
     print(f'Episode {e:4.0f} | Return {total_reward:9.3f} | Steps {steps:4.0f} | Remaining time {round(time_remaining / 3600, 2):5.2f} hours')
 
-evaluate_agent()
+evaluate(env, agent, run_id, steps, 3)
 
 env.close()
